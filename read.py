@@ -19,6 +19,7 @@ Your job: pick the best move index for the player's active Pokémon.
 Rules:
 - Return ONLY a compact JSON object: {"move_nb": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
 - Consider Gen 1 logic: move power/accuracy, type effectiveness, status impact, PP, both HP/levels, and KO risk.
+- If the oppent status is different as Healthy do not choose a move that impact the status's opponent.
 - NEVER choose a move with PP ≤ 0, undefined/bugged ("NA") or accuracy < 0.
 - With very low player HP, prioritize survival (sleep/paralysis/attack-down) over raw damage if it reduces KO risk.
 - Prefer reliable control (sleep/paralysis) when it creates a safe setup.
