@@ -6,18 +6,36 @@ import threading
 import paho.mqtt.client as mqtt
 from ollama import chat
 from ollama._types import ResponseError
+import ollama
 
 BROKER = "test.mosquitto.org"
 TOPIC_IN = "/dforirdod/PKM/battle/info"
 TOPIC_OUT = "/dforirdod/PKM/battle/move"
 MODEL = "gemma3"  # or another installed model tag, e.g. "gemma2:2b-instruct"
 
+
+def ensure_model(model_name: str):
+    """Check if the model exists locally, otherwise pull it."""
+    try:
+        models = ollama.list().get("models", [])
+        names = [m["name"].split(":")[0] for m in models]  # handle "gemma3:2b" etc.
+
+        if model_name not in names:
+            print(f"🔄 Pulling missing model '{model_name}'...")
+            ollama.pull(model_name)
+            print(f"✅ Model '{model_name}' installed successfully.")
+        else:
+            print(f"✅ Model '{model_name}' already installed.")
+    except Exception as e:
+        print(f"❌ Failed to check or pull model '{model_name}': {e}")
+
+
 SYSTEM = """You are a Pokémon Red (Gen 1) battle planner. 
 You will receive exactly one JSON object called "scene" describing the current battle state.
 Your job: pick the best move index for the player's active Pokémon.
 
 Rules:
-- Return ONLY a compact JSON object: {"move_nb": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
+- Return ONLY a compact JSON object: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
 - Consider Gen 1 logic: move power/accuracy, type effectiveness, status impact, PP, both HP/levels, and KO risk.
 - If the oppent status is different as Healthy do not choose a move that impact the status's opponent.
 - NEVER choose a move with PP ≤ 0, undefined/bugged ("NA") or accuracy < 0.
@@ -27,7 +45,7 @@ Rules:
 - If information is missing, make the safest reasonable assumption.
 
 Output format:
-- Exactly: {"move_nb": i, "move_name": "<name>", "reason": "<why>"}
+- Exactly: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"}
 - No markdown, no comments, no trailing text.
 """
 
@@ -80,26 +98,47 @@ def _safe_json_extract(s: str) -> dict:
     return json.loads(m.group(0))
 
 def _validate_move(scene_obj: dict, data: dict) -> tuple[int, str, str]:
-    if not all(k in data for k in ("move_nb", "move_name", "reason")):
+    # Ensure required keys exist
+    if not all(k in data for k in ("action", "choice", "move_name", "reason")):
         raise ValueError(f"Missing keys in {data}")
-    i = int(data["move_nb"])
-    if i not in (1,2,3,4):
+
+    if str(data["action"]).lower() != "move":
+        raise ValueError(f"Unsupported action: {data['action']}")
+
+    i = int(data["choice"])
+    if i not in (1, 2, 3, 4):
         raise ValueError(f"Illegal move index: {i}")
-    mv = scene_obj["scene"]["playerPKM"]["moves"][i-1]
+
+    # ⚠️ Adjust this path to your actual JSON structure if needed
+    mv = scene_obj["scene"]["playerPKM"]["moves"][i - 1]
+
     # Guardrails
-    if mv["name"].upper() == "NA": raise ValueError("Picked NA")
-    if mv["pp"][0] <= 0: raise ValueError("No PP")
-    if mv["accuracy"] is not None and mv["accuracy"] < 0: raise ValueError("Negative accuracy")
+    if mv["name"].upper() == "NA":
+        raise ValueError("Picked NA")
+    if mv["pp"][0] <= 0:
+        raise ValueError("No PP")
+    if mv["accuracy"] is not None and mv["accuracy"] < 0:
+        raise ValueError("Negative accuracy")
+
+    # Return move number, validated name, and reason
     return i, mv["name"], data["reason"]
 
+
 def _fallback_rule(scene_obj: dict) -> dict:
-    """Tiny deterministic fallback: prefer sleep, else highest power non-NA with PP>0."""
+    """Deterministic fallback: prefer sleep, else best power×accuracy move."""
     moves = scene_obj["scene"]["playerPKM"]["moves"]
-    # 1) sleep if available & PP>0
+
+    # 1) Prefer sleep-type move
     for idx, mv in enumerate(moves, start=1):
         if mv["name"].upper() == "SING" and mv["pp"][0] > 0 and (mv.get("accuracy", 0) >= 0):
-            return {"move_nb": idx, "move_name": mv["name"], "reason": "Fallback: sleep for survival"}
-    # 2) max (power * accuracy%) heuristic
+            return {
+                "action": "move",
+                "choice": idx,
+                "move_name": mv["name"],
+                "reason": "Fallback: sleep for survival",
+            }
+
+    # 2) Choose best power×accuracy move
     best = None
     for idx, mv in enumerate(moves, start=1):
         if mv["name"].upper() == "NA" or mv["pp"][0] <= 0 or mv.get("accuracy", -1) < 0:
@@ -109,9 +148,21 @@ def _fallback_rule(scene_obj: dict) -> dict:
         if best is None or score > best[0]:
             best = (score, idx, mv["name"])
     if best:
-        return {"move_nb": best[1], "move_name": best[2], "reason": "Fallback: highest power×accuracy"}
-    # 3) last resort
-    return {"move_nb": 1, "move_name": moves[0]["name"], "reason": "Fallback: default slot 1"}
+        return {
+            "action": "move",
+            "choice": best[1],
+            "move_name": best[2],
+            "reason": "Fallback: highest power×accuracy",
+        }
+
+    # 3) Default to first slot
+    return {
+        "action": "move",
+        "choice": 1,
+        "move_name": moves[0]["name"],
+        "reason": "Fallback: default slot 1",
+    }
+
 
 def decide_move(scene_obj: dict) -> str:
     payload = json.dumps({"scene": scene_obj})
@@ -134,14 +185,25 @@ def decide_move(scene_obj: dict) -> str:
         raw = (resp.message.content or "").strip()
         data = _safe_json_extract(raw)
         i, name, reason = _validate_move(scene_obj, data)
-        return json.dumps({"move_nb": i, "move_name": name, "reason": reason})
+        return json.dumps({
+            "action": "move",
+            "choice": i,
+            "move_name": name,
+            "reason": reason,
+        })
+
     except Exception as e_first:
         # --- Retry once, stricter instruction, no format lock (some models ignore 'format') ---
         retry_instr = {
             "role": "user",
             "content": json.dumps({
                 "scene": scene_obj,
-                "instruction": "Return ONLY JSON: {\"move_nb\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} with i in {1,2,3,4}. No other text."
+                "instruction": (
+                    "Return ONLY JSON: "
+                    "{\"action\": \"move\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
+                    "with i in {1,2,3,4}. No other text."
+                )
+
             })
         }
         try:
@@ -206,6 +268,7 @@ def on_message(client, userdata, msg):
 
 
 def main():
+    ensure_model(MODEL)
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pkm-move-agent")
     client.on_connect = on_connect
     client.on_message = on_message
