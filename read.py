@@ -11,7 +11,7 @@ import ollama
 BROKER = "test.mosquitto.org"
 TOPIC_IN = "/dforirdod/PKM/battle/info"
 TOPIC_OUT = "/dforirdod/PKM/battle/move"
-MODEL = "gemma3:1b"
+MODEL = "gemma3:latest"
 
 
 def ensure_model(model_name: str):
