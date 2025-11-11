@@ -11,14 +11,17 @@ import ollama
 BROKER = "test.mosquitto.org"
 TOPIC_IN = "/dforirdod/PKM/battle/info"
 TOPIC_OUT = "/dforirdod/PKM/battle/move"
-MODEL = "gemma3"  # or another installed model tag, e.g. "gemma2:2b-instruct"
+MODEL = "gemma3:1b"
 
 
 def ensure_model(model_name: str):
     """Check if the model exists locally, otherwise pull it."""
     try:
         models = ollama.list().get("models", [])
-        names = [m["name"].split(":")[0] for m in models]  # handle "gemma3:2b" etc.
+        print(f"Available models: {models}")
+        names = [m.model for m in models]  # handle "gemma3:2b" etc.
+
+        print(f"Models listed: {names}")
 
         if model_name not in names:
             print(f"🔄 Pulling missing model '{model_name}'...")
@@ -28,6 +31,8 @@ def ensure_model(model_name: str):
             print(f"✅ Model '{model_name}' already installed.")
     except Exception as e:
         print(f"❌ Failed to check or pull model '{model_name}': {e}")
+        return False
+    return True
 
 
 SYSTEM = """You are a Pokémon Red (Gen 1) battle planner. 
@@ -35,7 +40,7 @@ You will receive exactly one JSON object called "scene" describing the current b
 Your job: pick the best move index for the player's active Pokémon.
 
 Rules:
-- Return ONLY a compact JSON object: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
+- Return ONLY a compact JSON object: {"action": "attack","choice": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
 - Consider Gen 1 logic: move power/accuracy, type effectiveness, status impact, PP, both HP/levels, and KO risk.
 - If the oppent status is different as Healthy do not choose a move that impact the status's opponent.
 - NEVER choose a move with PP ≤ 0, undefined/bugged ("NA") or accuracy < 0.
@@ -45,7 +50,7 @@ Rules:
 - If information is missing, make the safest reasonable assumption.
 
 Output format:
-- Exactly: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"}
+- Exactly: {"action": "attack","choice": i, "move_name": "<name>", "reason": "<why>"}
 - No markdown, no comments, no trailing text.
 """
 
@@ -102,15 +107,16 @@ def _validate_move(scene_obj: dict, data: dict) -> tuple[int, str, str]:
     if not all(k in data for k in ("action", "choice", "move_name", "reason")):
         raise ValueError(f"Missing keys in {data}")
 
-    if str(data["action"]).lower() != "move":
+    if not  str(data["action"]).lower() in ["attack", "run", "item", "run"]:
         raise ValueError(f"Unsupported action: {data['action']}")
 
+    # TODO adjust depending on action type
     i = int(data["choice"])
     if i not in (1, 2, 3, 4):
         raise ValueError(f"Illegal move index: {i}")
 
     # ⚠️ Adjust this path to your actual JSON structure if needed
-    mv = scene_obj["scene"]["playerPKM"]["moves"][i - 1]
+    mv = scene_obj["scene"]["on_battle"]["moves"][i - 1]
 
     # Guardrails
     if mv["name"].upper() == "NA":
@@ -126,13 +132,13 @@ def _validate_move(scene_obj: dict, data: dict) -> tuple[int, str, str]:
 
 def _fallback_rule(scene_obj: dict) -> dict:
     """Deterministic fallback: prefer sleep, else best power×accuracy move."""
-    moves = scene_obj["scene"]["playerPKM"]["moves"]
+    moves = scene_obj["scene"]["on_battle"]["moves"]
 
     # 1) Prefer sleep-type move
     for idx, mv in enumerate(moves, start=1):
         if mv["name"].upper() == "SING" and mv["pp"][0] > 0 and (mv.get("accuracy", 0) >= 0):
             return {
-                "action": "move",
+                "action": "attack",
                 "choice": idx,
                 "move_name": mv["name"],
                 "reason": "Fallback: sleep for survival",
@@ -149,7 +155,7 @@ def _fallback_rule(scene_obj: dict) -> dict:
             best = (score, idx, mv["name"])
     if best:
         return {
-            "action": "move",
+            "action": "attack",
             "choice": best[1],
             "move_name": best[2],
             "reason": "Fallback: highest power×accuracy",
@@ -157,7 +163,7 @@ def _fallback_rule(scene_obj: dict) -> dict:
 
     # 3) Default to first slot
     return {
-        "action": "move",
+        "action": "attack",
         "choice": 1,
         "move_name": moves[0]["name"],
         "reason": "Fallback: default slot 1",
@@ -167,26 +173,44 @@ def _fallback_rule(scene_obj: dict) -> dict:
 def decide_move(scene_obj: dict) -> str:
     payload = json.dumps({"scene": scene_obj})
     # --- First attempt: force JSON output ---
+    print("I am reflecting on the scene to decide the best move...")
+    instruction = {
+        "role": "user",
+        "content": json.dumps({
+            "scene": scene_obj,
+            "instruction": (
+                "Return ONLY JSON: "
+                "{\"action\": \"attack\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
+                "with i in {1,2,3,4}. No other text."
+            )
+
+        })
+    }
     try:
         resp = chat(
             model=MODEL,
             messages=[
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": payload},
+                {
+                    "role": "system",
+                    "content": SYSTEM
+                },
+                instruction
             ],
             options={
                 "format": "json",       # <- forces JSON output in Ollama
                 "temperature": 0.2,
-                "num_predict": 48,
+                "num_predict": 96,
                 "seed": 7,
-                "stop": ["```", "\n\n"],
+                "num_ctx": 4096,
+                "stop":["```", "\n\n"],
             },
         )
+        print("Reflection complete. ")
         raw = (resp.message.content or "").strip()
         data = _safe_json_extract(raw)
         i, name, reason = _validate_move(scene_obj, data)
         return json.dumps({
-            "action": "move",
+            "action": "attack",
             "choice": i,
             "move_name": name,
             "reason": reason,
@@ -194,13 +218,14 @@ def decide_move(scene_obj: dict) -> str:
 
     except Exception as e_first:
         # --- Retry once, stricter instruction, no format lock (some models ignore 'format') ---
+        print("I am retrying to decide the best move...")
         retry_instr = {
             "role": "user",
             "content": json.dumps({
                 "scene": scene_obj,
                 "instruction": (
                     "Return ONLY JSON: "
-                    "{\"action\": \"move\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
+                    "{\"action\": \"attack\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
                     "with i in {1,2,3,4}. No other text."
                 )
 
@@ -215,7 +240,13 @@ def decide_move(scene_obj: dict) -> str:
             raw = (resp.message.content or "").strip()
             data = _safe_json_extract(raw)
             i, name, reason = _validate_move(scene_obj, data)
-            return json.dumps({"move_nb": i, "move_name": name, "reason": reason})
+            
+            return json.dumps({
+                "action": "attack",
+                "choice": i,
+                "move_name": name,
+                "reason": reason,
+            })
         except Exception as e_second:
             # --- Final fallback: rule-based to keep the pipeline alive ---
             fb = _fallback_rule(scene_obj)
@@ -268,7 +299,9 @@ def on_message(client, userdata, msg):
 
 
 def main():
-    ensure_model(MODEL)
+    if not ensure_model(MODEL):
+        logger.error(f"Model {MODEL} is not available. Exiting.")
+        return
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pkm-move-agent")
     client.on_connect = on_connect
     client.on_message = on_message
