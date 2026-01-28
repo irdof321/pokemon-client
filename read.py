@@ -40,9 +40,9 @@ You will receive exactly one JSON object called "scene" describing the current b
 Your job: pick the best move index for the player's active Pokémon.
 
 Rules:
-- Return ONLY a compact JSON object: {"action": "attack","choice": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
+- Return ONLY a compact JSON object: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"} where i ∈ {1,2,3,4}. No prose, no extra keys.
 - Consider Gen 1 logic: move power/accuracy, type effectiveness, status impact, PP, both HP/levels, and KO risk.
-- If the oppent status is different as Healthy do not choose a move that impact the status's opponent.
+- If the opponent status is different as Healthy do not choose a move that impact the status's opponent.
 - NEVER choose a move with PP ≤ 0, undefined/bugged ("NA") or accuracy < 0.
 - With very low player HP, prioritize survival (sleep/paralysis/attack-down) over raw damage if it reduces KO risk.
 - Prefer reliable control (sleep/paralysis) when it creates a safe setup.
@@ -50,7 +50,7 @@ Rules:
 - If information is missing, make the safest reasonable assumption.
 
 Output format:
-- Exactly: {"action": "attack","choice": i, "move_name": "<name>", "reason": "<why>"}
+- Exactly: {"action": "move","choice": i, "move_name": "<name>", "reason": "<why>"}
 - No markdown, no comments, no trailing text.
 """
 
@@ -107,7 +107,7 @@ def _validate_move(scene_obj: dict, data: dict) -> tuple[int, str, str]:
     if not all(k in data for k in ("action", "choice", "move_name", "reason")):
         raise ValueError(f"Missing keys in {data}")
 
-    if not  str(data["action"]).lower() in ["attack", "run", "item", "run"]:
+    if not  str(data["action"]).lower() in ["move", "run", "item", "run"]:
         raise ValueError(f"Unsupported action: {data['action']}")
 
     # TODO adjust depending on action type
@@ -138,7 +138,7 @@ def _fallback_rule(scene_obj: dict) -> dict:
     for idx, mv in enumerate(moves, start=1):
         if mv["name"].upper() == "SING" and mv["pp"][0] > 0 and (mv.get("accuracy", 0) >= 0):
             return {
-                "action": "attack",
+                "action": "move",
                 "choice": idx,
                 "move_name": mv["name"],
                 "reason": "Fallback: sleep for survival",
@@ -155,7 +155,7 @@ def _fallback_rule(scene_obj: dict) -> dict:
             best = (score, idx, mv["name"])
     if best:
         return {
-            "action": "attack",
+            "action": "move",
             "choice": best[1],
             "move_name": best[2],
             "reason": "Fallback: highest power×accuracy",
@@ -163,7 +163,7 @@ def _fallback_rule(scene_obj: dict) -> dict:
 
     # 3) Default to first slot
     return {
-        "action": "attack",
+        "action": "move",
         "choice": 1,
         "move_name": moves[0]["name"],
         "reason": "Fallback: default slot 1",
@@ -180,7 +180,7 @@ def decide_move(scene_obj: dict) -> str:
             "scene": scene_obj,
             "instruction": (
                 "Return ONLY JSON: "
-                "{\"action\": \"attack\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
+                "{\"action\": \"move\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
                 "with i in {1,2,3,4}. No other text."
             )
 
@@ -210,7 +210,7 @@ def decide_move(scene_obj: dict) -> str:
         data = _safe_json_extract(raw)
         i, name, reason = _validate_move(scene_obj, data)
         return json.dumps({
-            "action": "attack",
+            "action": "move",
             "choice": i,
             "move_name": name,
             "reason": reason,
@@ -225,7 +225,7 @@ def decide_move(scene_obj: dict) -> str:
                 "scene": scene_obj,
                 "instruction": (
                     "Return ONLY JSON: "
-                    "{\"action\": \"attack\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
+                    "{\"action\": \"move\", \"choice\": i, \"move_name\": \"<name>\", \"reason\": \"<why>\"} "
                     "with i in {1,2,3,4}. No other text."
                 )
 
@@ -242,7 +242,7 @@ def decide_move(scene_obj: dict) -> str:
             i, name, reason = _validate_move(scene_obj, data)
             
             return json.dumps({
-                "action": "attack",
+                "action": "move",
                 "choice": i,
                 "move_name": name,
                 "reason": reason,
